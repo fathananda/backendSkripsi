@@ -1,80 +1,120 @@
 """
-Router: Translation
-Endpoint untuk terjemahan teks menggunakan NLLB-200
+app/routers/translate.py
+Router terjemahan teks.
+
+Optimasi kecepatan:
+- num_beams default = 1 (greedy) → ~4x lebih cepat
+- Cache hasil translate selama 1 jam
+- Non-blocking via run_in_executor
 """
 
-from fastapi import APIRouter, Request, HTTPException
-from app.models.schemas import (
-    TranslateRequest, TranslateResponse,
-    BatchTranslateRequest, ErrorResponse
-)
+import asyncio
 import logging
+from fastapi import APIRouter, Request, HTTPException, Query
+
+from app.models.schemas import (
+    TranslateRequest,
+    TranslateResponse,
+    BatchTranslateRequest,
+    BatchTranslateResponse,
+    ErrorResponse,
+)
+from app.utils.cache import translation_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _get_nllb(request: Request):
+    nllb = request.app.state.nllb_model
+    if not nllb or not nllb.is_loaded:
+        raise HTTPException(
+            status_code=503,
+            detail="Model NLLB belum siap. Coba beberapa saat lagi."
+        )
+    return nllb
+
+
 @router.post(
     "/translate",
     response_model=TranslateResponse,
+    responses={503: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
     summary="Terjemahkan teks",
-    description="Terjemahkan teks antara Bahasa Indonesia dan bahasa daerah menggunakan NLLB-200"
 )
 async def translate_text(request: Request, body: TranslateRequest):
     """
-    Endpoint utama terjemahan teks.
-    
-    - **text**: Teks yang akan diterjemahkan (max 2000 karakter)
-    - **source_lang**: Kode bahasa sumber (ind/jav/sun/ace/ban/bjn/bug/min)
-    - **target_lang**: Kode bahasa target
-    - **num_beams**: Kualitas terjemahan (1=cepat, 8=akurat)
-    """
-    nllb_model = request.app.state.nllb_model
-    if not nllb_model or not nllb_model.is_loaded:
-        raise HTTPException(status_code=503, detail="Model NLLB-200 belum siap")
+    Terjemahkan teks dari bahasa sumber ke bahasa target.
 
+    **Tips kecepatan:**
+    - `num_beams=1` (default): greedy decoding, paling cepat (~1-3 detik di CPU)
+    - `num_beams=4`: beam search, lebih akurat untuk teks panjang (~4-8 detik)
+    """
+    nllb = _get_nllb(request)
+
+    # Cek cache terlebih dahulu — instant response jika sudah pernah diterjemahkan
+    cached = translation_cache.get(
+        body.text, body.source_lang, body.target_lang, body.num_beams
+    )
+    if cached:
+        logger.info(f"Cache HIT: {body.source_lang}->{body.target_lang}")
+        return {**cached, "processing_time_ms": 0}
+
+    # Jalankan inference di thread pool — tidak blocking event loop FastAPI
+    loop = asyncio.get_event_loop()
     try:
-        result = nllb_model.translate(
-            text=body.text,
-            source_lang=body.source_lang,
-            target_lang=body.target_lang,
-            num_beams=body.num_beams,
+        result = await loop.run_in_executor(
+            None,
+            lambda: nllb.translate(
+                text=body.text,
+                source_lang=body.source_lang,
+                target_lang=body.target_lang,
+                num_beams=body.num_beams,
+            ),
         )
-        return TranslateResponse(**result, success=True)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Translation error: {e}")
-        raise HTTPException(status_code=500, detail="Terjadi kesalahan saat menerjemahkan")
+        logger.error(f"Translate error: {e}")
+        raise HTTPException(status_code=500, detail="Gagal menerjemahkan teks.")
+
+    # Simpan ke cache
+    translation_cache.set(
+        body.text, body.source_lang, body.target_lang, result, body.num_beams
+    )
+
+    return result
 
 
 @router.post(
     "/translate/batch",
+    response_model=BatchTranslateResponse,
+    responses={503: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
     summary="Terjemahkan banyak teks sekaligus",
-    description="Terjemahkan multiple teks — berguna untuk evaluasi BLEU Score"
 )
 async def batch_translate(request: Request, body: BatchTranslateRequest):
     """
-    Terjemahkan banyak kalimat sekaligus.
-    Berguna untuk evaluasi performa model menggunakan BLEU Score.
+    True batching — lebih efisien dari memanggil /translate berulang kali.
     """
-    nllb_model = request.app.state.nllb_model
-    if not nllb_model or not nllb_model.is_loaded:
-        raise HTTPException(status_code=503, detail="Model NLLB-200 belum siap")
+    nllb = _get_nllb(request)
 
+    if not body.texts:
+        raise HTTPException(status_code=400, detail="Daftar teks tidak boleh kosong.")
+
+    loop = asyncio.get_event_loop()
     try:
-        results = nllb_model.batch_translate(
-            texts=body.texts,
-            source_lang=body.source_lang,
-            target_lang=body.target_lang,
+        results = await loop.run_in_executor(
+            None,
+            lambda: nllb.batch_translate(
+                texts=body.texts,
+                source_lang=body.source_lang,
+                target_lang=body.target_lang,
+                num_beams=body.num_beams,
+            ),
         )
-        return {
-            "success": True,
-            "total": len(results),
-            "results": results,
-        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Batch translation error: {e}")
-        raise HTTPException(status_code=500, detail="Terjadi kesalahan saat batch translate")
+        logger.error(f"Batch translate error: {e}")
+        raise HTTPException(status_code=500, detail="Gagal menerjemahkan batch teks.")
+
+    return {"success": True, "total": len(results), "results": results}
