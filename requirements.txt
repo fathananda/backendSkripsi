@@ -12,4 +12,4 @@ numpy==1.26.4
 soundfile==0.12.1
 librosa==0.10.2
 accelerate==0.31.0
-openai-whisper==20231117
+openai-whisper @ git+https://github.com/openai/openai-whisper.git
