@@ -2,9 +2,10 @@ FROM python:3.11.12-slim
 
 WORKDIR /app
 
-# Install git (untuk install openai-whisper dari GitHub) dan setuptools
-RUN apt-get update && apt-get install -y git ffmpeg && rm -rf /var/lib/apt/lists/*
-RUN pip install "setuptools>=68.0.0"
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
+# Downgrade setuptools ke versi yang masih include pkg_resources
+RUN pip install "setuptools==67.8.0"
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt
