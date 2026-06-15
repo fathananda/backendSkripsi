@@ -4,11 +4,13 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Install setuptools versi lama DULU, lalu install whisper di sini
-RUN pip install "setuptools==67.8.0"
-RUN pip install openai-whisper==20231117
+# Install pkg_resources via package terpisah yang tersedia di PyPI
+RUN pip install pkginfo setuptools==67.8.0 wheel
 
-# Sekarang baru install sisanya (boleh upgrade setuptools)
+# Install whisper dengan no-build-isolation agar pakai setuptools yang sudah ada
+RUN pip install --no-build-isolation openai-whisper==20231117
+
+# Install sisanya
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
