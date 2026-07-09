@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 RUN pip install pkginfo setuptools==67.8.0 wheel
 
 # Install whisper dengan no-build-isolation agar pakai setuptools yang sudah ada
-RUN pip install --no-build-isolation openai-whisper==20231117
+RUN pip install --no-build-isolation openai-whisper==20231117 numpy==1.26.4
 
 # Install sisanya
 COPY requirements.txt .
